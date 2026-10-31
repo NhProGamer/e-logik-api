@@ -6,16 +6,13 @@ Client Go pour l'API e-commerce v2 de l'OMS e-Logik
 ## Installation
 
 ```sh
-go get e-logik-api
+go get github.com/NhProGamer/e-logik-api
 ```
-
-Le module s'appelle `e-logik-api` et le package `elogik`. Pense à changer le
-chemin du module dans `go.mod` quand le dépôt aura un remote.
 
 ## Démarrage rapide
 
 ```go
-import elogik "e-logik-api"
+import elogik "github.com/NhProGamer/e-logik-api"
 
 c := elogik.New(os.Getenv("ELOGIK_USER"), os.Getenv("ELOGIK_PASSWORD"))
 
