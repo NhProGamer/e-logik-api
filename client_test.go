@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 	t.Helper()
+	retryBase = time.Millisecond
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	c := New("user", "secret")
@@ -153,7 +156,9 @@ func TestServicesMatchSpec(t *testing.T) {
 }
 
 func TestDo(t *testing.T) {
+	attempts := 0
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
 		if u, p, ok := r.BasicAuth(); !ok || u != "user" || p != "secret" {
 			t.Errorf("basic auth = %q %q %v", u, p, ok)
 		}
@@ -173,8 +178,48 @@ func TestDo(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != 429 || apiErr.Code != "TOO_MANY_REQUESTS" {
 		t.Fatalf("err = %#v", err)
 	}
+	if attempts != maxRetries+1 {
+		t.Errorf("attempts = %d, want %d", attempts, maxRetries+1)
+	}
 	if rem, size, ok := c.CallLimit(); !ok || rem != 0 || size != 400 {
 		t.Errorf("CallLimit = %d/%d %v", rem, size, ok)
+	}
+}
+
+func TestDoRetriesOn429(t *testing.T) {
+	var bodies []string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if len(bodies) < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`{"url":"https://example.test/hook"}`))
+	})
+
+	url := "https://example.test/hook"
+	got, err := c.Webhooks.Creer(context.Background(), APIFormWebhookDTO{Url: url})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Url == nil || *got.Url != url {
+		t.Errorf("got = %#v", got)
+	}
+	if len(bodies) != 3 || bodies[0] == "" || bodies[0] != bodies[2] {
+		t.Errorf("bodies sent = %q", bodies)
+	}
+}
+
+func TestDoDoesNotRetryOtherErrors(t *testing.T) {
+	attempts := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"code":"ERR_BAD_REQUEST","message":"Request limit exceeded"}`))
+	})
+	if _, err := c.Webhooks.Liste(context.Background()); err == nil || attempts != 1 {
+		t.Errorf("err = %v, attempts = %d", err, attempts)
 	}
 }
 

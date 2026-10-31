@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 // DefaultBaseURL is the EKAN Roissy instance of the e-Logik OMS API v2.
@@ -53,9 +55,10 @@ func New(user, password string) *Client {
 
 // Error is returned for any non-2xx response.
 //
-// StatusCode 429 means the token bucket is empty: wait one second per
-// token needed. A 400 with Message "Request limit exceeded" means a single
-// call asked for more than the bucket size and must be split.
+// 429 responses are retried with backoff; StatusCode 429 here means the
+// token bucket stayed empty for every retry. A 400 with Message "Request
+// limit exceeded" means a single call asked for more than the bucket size
+// and must be split: it is not retried.
 type Error struct {
 	StatusCode int    `json:"-"`
 	Code       string `json:"code"`
@@ -76,14 +79,41 @@ func (c *Client) CallLimit() (remaining, size int, ok bool) {
 	return remaining, size, err == nil
 }
 
+// maxRetries and retryBase bound the wait on 429: 1+2+4+8+16 = 31s, enough
+// to refill the tokens of any single write call. Vars so tests run fast.
+var (
+	maxRetries = 5
+	retryBase  = time.Second
+)
+
+// do retries on 429 only: the API guarantees the call was not processed,
+// so retrying is safe even for writes such as commandes/creer.
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
-	var body io.Reader
+	var payload []byte
 	if in != nil {
-		b, err := json.Marshal(in)
-		if err != nil {
+		var err error
+		if payload, err = json.Marshal(in); err != nil {
 			return err
 		}
-		body = bytes.NewReader(b)
+	}
+	for attempt := 0; ; attempt++ {
+		err := c.doOnce(ctx, method, path, payload, out)
+		var apiErr *Error
+		if attempt >= maxRetries || !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryBase << attempt):
+		}
+	}
+}
+
+func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte, out any) error {
+	var body io.Reader
+	if payload != nil {
+		body = bytes.NewReader(payload)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
 	if err != nil {
@@ -91,7 +121,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	}
 	req.SetBasicAuth(c.user, c.password)
 	req.Header.Set("Accept", "application/json")
-	if in != nil {
+	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
