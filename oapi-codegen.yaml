@@ -1,0 +1,4 @@
+package: elogik
+output: types.gen.go
+generate:
+  models: true
