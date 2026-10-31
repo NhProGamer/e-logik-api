@@ -17,10 +17,22 @@ import (
 // DefaultBaseURL is the EKAN Roissy instance of the e-Logik OMS API v2.
 const DefaultBaseURL = "https://oms.ekan-roissy.fr/api/ecomm/v2"
 
+// Default retry settings: waits of 1+2+4+8+16 = 31s refill enough tokens
+// for any single call, the bucket refilling one token per second.
+const (
+	DefaultMaxRetries = 5
+	DefaultRetryDelay = time.Second
+)
+
 // Client calls the API with HTTP Basic credentials. Use New to build one.
 type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
+
+	// MaxRetries is how many times a 429 response is retried; 0 disables it.
+	MaxRetries int
+	// RetryDelay is the first wait after a 429, doubled on each retry.
+	RetryDelay time.Duration
 
 	user, password string
 
@@ -40,7 +52,14 @@ type Client struct {
 
 // New returns a client for DefaultBaseURL using http.DefaultClient.
 func New(user, password string) *Client {
-	c := &Client{BaseURL: DefaultBaseURL, HTTPClient: http.DefaultClient, user: user, password: password}
+	c := &Client{
+		BaseURL:    DefaultBaseURL,
+		HTTPClient: http.DefaultClient,
+		MaxRetries: DefaultMaxRetries,
+		RetryDelay: DefaultRetryDelay,
+		user:       user,
+		password:   password,
+	}
 	c.Articles = &ArticlesService{c}
 	c.Colis = &ColisService{c}
 	c.Commandes = &CommandesService{c}
@@ -79,13 +98,6 @@ func (c *Client) CallLimit() (remaining, size int, ok bool) {
 	return remaining, size, err == nil
 }
 
-// maxRetries and retryBase bound the wait on 429: 1+2+4+8+16 = 31s, enough
-// to refill the tokens of any single write call. Vars so tests run fast.
-var (
-	maxRetries = 5
-	retryBase  = time.Second
-)
-
 // do retries on 429 only: the API guarantees the call was not processed,
 // so retrying is safe even for writes such as commandes/creer.
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
@@ -99,13 +111,13 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	for attempt := 0; ; attempt++ {
 		err := c.doOnce(ctx, method, path, payload, out)
 		var apiErr *Error
-		if attempt >= maxRetries || !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests {
+		if attempt >= c.MaxRetries || !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests {
 			return err
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(retryBase << attempt):
+		case <-time.After(c.RetryDelay << attempt):
 		}
 	}
 }

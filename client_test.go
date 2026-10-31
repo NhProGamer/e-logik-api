@@ -16,11 +16,11 @@ import (
 
 func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 	t.Helper()
-	retryBase = time.Millisecond
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	c := New("user", "secret")
 	c.BaseURL = srv.URL + "/api/ecomm/v2"
+	c.RetryDelay = time.Millisecond
 	return c
 }
 
@@ -178,8 +178,8 @@ func TestDo(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != 429 || apiErr.Code != "TOO_MANY_REQUESTS" {
 		t.Fatalf("err = %#v", err)
 	}
-	if attempts != maxRetries+1 {
-		t.Errorf("attempts = %d, want %d", attempts, maxRetries+1)
+	if attempts != DefaultMaxRetries+1 {
+		t.Errorf("attempts = %d, want %d", attempts, DefaultMaxRetries+1)
 	}
 	if rem, size, ok := c.CallLimit(); !ok || rem != 0 || size != 400 {
 		t.Errorf("CallLimit = %d/%d %v", rem, size, ok)
@@ -208,6 +208,18 @@ func TestDoRetriesOn429(t *testing.T) {
 	}
 	if len(bodies) != 3 || bodies[0] == "" || bodies[0] != bodies[2] {
 		t.Errorf("bodies sent = %q", bodies)
+	}
+}
+
+func TestMaxRetriesZeroDisablesRetry(t *testing.T) {
+	attempts := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	c.MaxRetries = 0
+	if _, err := c.Webhooks.Liste(context.Background()); err == nil || attempts != 1 {
+		t.Errorf("err = %v, attempts = %d", err, attempts)
 	}
 }
 
